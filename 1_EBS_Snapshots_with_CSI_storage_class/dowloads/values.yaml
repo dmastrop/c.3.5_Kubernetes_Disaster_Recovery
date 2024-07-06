@@ -1,0 +1,19 @@
+configuration:
+  backupStorageLocation:
+    bucket: recovery.linuxschoolonline.com
+  provider: aws
+  volumeSnapshotLocation:
+    config:
+      region: eu-west-1
+credentials:
+  useSecret: false
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.2.0
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+serviceAccount:
+  server:
+    annotations:
+      eks.amazonaws.com/role-arn: "arn:aws:iam::790250078024:role/eks-velero-backup"
