@@ -19,3 +19,54 @@ serviceAccount:
     annotations:
       # this can be found in AWS; the role that we created and linked to the service account
       eks.amazonaws.com/role-arn: "arn:aws:iam::590183769797:role/eks-velero-backup"
+
+
+
+
+        helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+
+cat > values.yaml <<EOF
+configuration:
+  backupStorageLocation:
+  - bucket: $BUCKET
+    provider: aws
+  volumeSnapshotLocation:
+  - config:
+      region: $REGION
+    provider: aws
+initContainers:
+- name: velero-plugin-for-aws
+  image: velero/velero-plugin-for-aws:v1.7.1
+  volumeMounts:
+  - mountPath: /target
+    name: plugins
+credentials:
+  useSecret: false
+serviceAccount:
+  server:
+    annotations:
+      eks.amazonaws.com/role-arn: "arn:aws:iam::${ACCOUNT}:role/eks-velero-backup"
+EOF
+
+cat > values_recovery.yaml <<EOF
+configuration:
+  backupStorageLocation:
+  - bucket: $BUCKET
+    provider: aws
+  volumeSnapshotLocation:
+  - config:
+      region: $REGION
+    provider: aws
+initContainers:
+- name: velero-plugin-for-aws
+  image: velero/velero-plugin-for-aws:v1.7.1
+  volumeMounts:
+  - mountPath: /target
+    name: plugins
+credentials:
+  useSecret: false
+serviceAccount:
+  server:
+    annotations:
+      eks.amazonaws.com/role-arn: "arn:aws:iam::${ACCOUNT}:role/eks-velero-recovery"
+EOF
