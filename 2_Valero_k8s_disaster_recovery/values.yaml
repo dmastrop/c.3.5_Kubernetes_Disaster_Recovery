@@ -1,19 +1,28 @@
 configuration:
   backupStorageLocation:
     # s3 bucket was created earlier
-    bucket: recovery.holinessinloveofchrist.com
-  provider: aws
+  - bucket: recovery.holinessinloveofchrist.com
+    provider: aws
+
+
   volumeSnapshotLocation:
-    config:
+  - config:
       region: us-east-1
+    provider: aws
+
+
 credentials:
   useSecret: false
+
+
 initContainers:
   - name: velero-plugin-for-aws
     image: velero/velero-plugin-for-aws:v1.2.0
     volumeMounts:
       - mountPath: /target
         name: plugins
+
+
 serviceAccount:
   server:
     annotations:
@@ -23,50 +32,53 @@ serviceAccount:
 
 
 
-        helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+## above had to be revised from original.  map to slice is required and provider aws is given for each of 
+# backup storage location and volume snapshot location.
+## FULL CORRECT EXAMPLE 
+## from https://aws.amazon.com/blogs/containers/backup-and-restore-your-amazon-eks-cluster-resources-using-velero/
 
-cat > values.yaml <<EOF
-configuration:
-  backupStorageLocation:
-  - bucket: $BUCKET
-    provider: aws
-  volumeSnapshotLocation:
-  - config:
-      region: $REGION
-    provider: aws
-initContainers:
-- name: velero-plugin-for-aws
-  image: velero/velero-plugin-for-aws:v1.7.1
-  volumeMounts:
-  - mountPath: /target
-    name: plugins
-credentials:
-  useSecret: false
-serviceAccount:
-  server:
-    annotations:
-      eks.amazonaws.com/role-arn: "arn:aws:iam::${ACCOUNT}:role/eks-velero-backup"
-EOF
+# cat > values.yaml <<EOF
+# configuration:
+#   backupStorageLocation:
+#   - bucket: $BUCKET
+#     provider: aws
+#   volumeSnapshotLocation:
+#   - config:
+#       region: $REGION
+#     provider: aws
+# initContainers:
+# - name: velero-plugin-for-aws
+#   image: velero/velero-plugin-for-aws:v1.7.1
+#   volumeMounts:
+#   - mountPath: /target
+#     name: plugins
+# credentials:
+#   useSecret: false
+# serviceAccount:
+#   server:
+#     annotations:
+#       eks.amazonaws.com/role-arn: "arn:aws:iam::${ACCOUNT}:role/eks-velero-backup"
+# EOF
 
-cat > values_recovery.yaml <<EOF
-configuration:
-  backupStorageLocation:
-  - bucket: $BUCKET
-    provider: aws
-  volumeSnapshotLocation:
-  - config:
-      region: $REGION
-    provider: aws
-initContainers:
-- name: velero-plugin-for-aws
-  image: velero/velero-plugin-for-aws:v1.7.1
-  volumeMounts:
-  - mountPath: /target
-    name: plugins
-credentials:
-  useSecret: false
-serviceAccount:
-  server:
-    annotations:
-      eks.amazonaws.com/role-arn: "arn:aws:iam::${ACCOUNT}:role/eks-velero-recovery"
-EOF
+# cat > values_recovery.yaml <<EOF
+# configuration:
+#   backupStorageLocation:
+#   - bucket: $BUCKET
+#     provider: aws
+#   volumeSnapshotLocation:
+#   - config:
+#       region: $REGION
+#     provider: aws
+# initContainers:
+# - name: velero-plugin-for-aws
+#   image: velero/velero-plugin-for-aws:v1.7.1
+#   volumeMounts:
+#   - mountPath: /target
+#     name: plugins
+# credentials:
+#   useSecret: false
+# serviceAccount:
+#   server:
+#     annotations:
+#       eks.amazonaws.com/role-arn: "arn:aws:iam::${ACCOUNT}:role/eks-velero-recovery"
+# EOF
