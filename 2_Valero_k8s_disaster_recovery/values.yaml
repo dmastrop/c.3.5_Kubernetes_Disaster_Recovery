@@ -1,0 +1,21 @@
+configuration:
+  backupStorageLocation:
+    # s3 bucket was created earlier
+    bucket: recovery.holinessinloveofchrist.com
+  provider: aws
+  volumeSnapshotLocation:
+    config:
+      region: us-east-1
+credentials:
+  useSecret: false
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.2.0
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+serviceAccount:
+  server:
+    annotations:
+      # this can be found in AWS; the role that we created and linked to the service account
+      eks.amazonaws.com/role-arn: "arn:aws:iam::590183769797:role/eks-velero-backup"
