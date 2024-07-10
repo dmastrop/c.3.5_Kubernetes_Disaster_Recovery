@@ -1,0 +1,8 @@
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: db-snapshot-2
+spec:
+  volumeSnapshotClassName: test-snapclass
+  source:
+    persistentVolumeClaimName: data-weatherapp-auth-mysql-0
