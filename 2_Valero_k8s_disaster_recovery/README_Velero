@@ -1,13 +1,25 @@
-# Velero for cluster disaster recovery with EKS cluster and with kops cluster
+# Velero for cluster disaster recovery with EKS cluster and with kops cluster.
+
+NOTE: use the EKS controller course3_COMPLETE_kops_from_course8_project14_kops_snapshot in us-east-1 for all of the setups below.   
+
+
+
+
+
+
 
 ## EKS Cluster (using velero client and velero server, but using helm to install the velero server)
 
 
-### backup and restore
+### backup and restore setup with Velero on EKS cluster
 
 
 
 ### cluster migration to new cluster
+
+
+
+
 
 
 
@@ -16,7 +28,450 @@
 ## kops cluster (using velero client and velero server)
 
 
-### backup and restore
+### bring up the kops cluster in the course3_kops directory on the EC2 controller
+
+export KOPS_CLUSTER_NAME=kops-project14.holinessinloveofchrist.com
+
+export KOPS_STATE_STORE=s3://course3-kops-aws2-s3-state
 
 
-### cluster migration to new cluster
+kops create cluster --node-count=1 --node-size=t3.small --zones=us-east-1a --master-size=t3.small --master-zones=us-east-1a --ssh-public-key=course3_kops_from_course8_project14_EC2_instance_key.pub
+
+kops update cluster --name kops-project14.holinessinloveofchrist.com --yes --admin
+
+kubectl get node -o wide
+
+
+### bring up the weatherapp using helm. This will be used to verify the backup and restore below via db corruption.
+
+
+helm upgrade --install weatherapp-auth --set mysql.auth.rootPassword=mystrongpassword .
+
+
+cd ..
+
+helm upgrade --install weatherapp-ui .
+
+
+
+cd ..
+
+
+helm upgrade --install weatherapp-weather --set apikey=6eafbb0c45msh451df8302c291f2p1e0a35jsnf98732edea29 .
+
+
+Verify the app is working by going to the LoadBalancer URL in kubectl get svc
+
+Create a test user to be used later for the backup and restore test (user test)
+
+
+
+
+
+### BACKUP AND RESTORE SETUP WITH VELERO ON kops CLUSTER:
+
+
+#### Step 1:S3 bucket
+
+First create the S3 bucket which will be used to store the backup state and the restore state of the cluster
+aws s3 mb s3://recovery.holinessinloveofchrist.com --region us-east-1
+
+##### Step 2: Velero Client installation
+
+installing client side (CLI) 1.14.0 
+wget https://github.com/vmware-tanzu/velero/releases/download/v1.14.0/velero-v1.14.0-linux-amd64.tar.gz
+tar -xvf velero-v1.14.0-linux-amd64.tar.gz 
+sudo mv velero-v1.14.0-linux-amd64/velero /usr/local/bin
+velero version
+
+velero version
+Client:
+        Version: v1.14.0
+        Git commit: 2fc6300f2239f250b40b0488c35feae59520f2d3
+<error getting server version: no matches for kind "ServerStatusRequest" in version "velero.io/v1">
+
+The error is expected prior to installing the server
+
+
+
+#### Step 3: Velero server installation
+
+References:
+
+https://velero.io/docs/v1.13/basic-install/#install-and-configure-the-server-components
+https://velero.io/docs/v1.13/supported-providers/
+https://github.com/vmware-tanzu/velero-plugin-for-aws#setup
+
+
+server side:
+
+1.10.0 is the latest plugin. This takes the place of the helm install with the values.yaml file in the video. This is ideal for a kops cluster as eksctl command cannot be used for the policy administration with kops.
+
+
+
+Use the IAM method rather than kube2iam method in the links. This is the easiest way to do it.
+
+
+
+create IAM user velero
+aws iam create-user --user-name velero
+
+
+
+attach the velero-policy.json policy to the velero user
+note name is changed from velero_policy.json to velero-policy.json. It is the same file as used in the video, just replace the arn of your s3 bucket.
+
+
+aws iam put-user-policy \
+--user-name velero \
+--policy-name velero \
+--policy-document file://velero-policy.json
+
+
+You will be able to see the IAM user and policy attached to it on AWS console to verify.
+
+
+Create access keys for the velero user
+aws iam create-access-key --user-name velero
+
+Copy down the access key and secret access key
+
+
+Create a file called credentials-velero
+
+[default]
+aws_access_key_id=<AWS_ACCESS_KEY_ID>
+aws_secret_access_key=<AWS_SECRET_ACCESS_KEY>
+
+
+Make sure the velero client has been downloaded and is working
+velero version
+
+velero version
+Client:
+        Version: v1.14.0
+        Git commit: 2fc6300f2239f250b40b0488c35feae59520f2d3
+<error getting server version: no matches for kind "ServerStatusRequest" in version "velero.io/v1">
+
+The error is expected prior to installing the server
+
+
+
+use velero install to install the server plugin using credentials-velero file created above
+
+velero install \
+--provider aws \
+--plugins velero/velero-plugin-for-aws:v1.10.0 \
+--bucket $BUCKET \
+--backup-location-config region=$REGION \
+--snapshot-location-config region=$REGION \
+--secret-file ./credentials-velero
+
+
+$BUCKET is just the bucket name, not the full arn
+REGION is just the region, for example us-east-1
+
+
+
+You should see a success message that server is now installed to the cluster
+
+Deployment/velero: attempting to create resource client
+Deployment/velero: created
+Velero is installed! ⛵ Use 'kubectl logs deployment/velero -n velero' to view the status.
+
+
+
+verify the install with kubectl get deployment -n velero
+(the velero namespace is automatically created)
+
+
+kubectl get deployment -n velero
+NAME READY UP-TO-DATE AVAILABLE AGE
+velero 1/1 1 1 40s
+
+kubectl get ns
+NAME STATUS AGE
+default Active 3h18m
+kube-node-lease Active 3h18m
+kube-public Active 3h18m
+kube-system Active 3h18m
+velero Active 46s
+
+
+
+verify the server pod is running with kubectl get pod -n velero
+
+kubectl get pod -n velero
+NAME READY STATUS RESTARTS AGE
+velero-7fd78cc8dc-grjln 1/1 Running 0 72s
+
+
+
+
+
+Velero version client should now show the server version
+
+
+ubuntu@ip-172-31-21-52:~/course3_projects/5_Disaster_Recovery/2_Valero_k8s_disaster_recovery/kops_method$ velero version
+Client:
+        Version: v1.14.0
+        Git commit: 2fc6300f2239f250b40b0488c35feae59520f2d3
+Server:
+        Version: v1.14.0
+
+
+
+#### Step 4: Perform the backup
+
+
+NOTE the app is running with a user test/test and login to the app is successful
+
+ubuntu@ip-172-31-21-52:~/course3_projects/5_Disaster_Recovery/2_Valero_k8s_disaster_recovery/kops_method$ kubectl get pod
+NAME                                  READY   STATUS    RESTARTS        AGE
+weatherapp-auth-76c8df5d6b-k6f9h      1/1     Running   3 (9m26s ago)   10m
+weatherapp-auth-76c8df5d6b-lxdkq      1/1     Running   3 (9m26s ago)   10m
+weatherapp-auth-mysql-0               1/1     Running   0               10m
+weatherapp-ui-5bd8dcc685-csqx5        1/1     Running   0               10m
+weatherapp-ui-5bd8dcc685-jlr4g        1/1     Running   0               10m
+weatherapp-weather-77b797b646-5fxdm   1/1     Running   0               9m35s
+weatherapp-weather-77b797b646-s7k5c   1/1     Running   0               9m35s
+
+
+
+
+velero backup create golden-backup2
+Backup request "golden-backup2" submitted successfully.
+Run `velero backup describe golden-backup2` or `velero backup logs golden-backup2` for more details.
+
+
+
+velero backup describe golden-backup2
+Name:         golden-backup2
+Namespace:    velero
+Labels:       velero.io/storage-location=default
+Annotations:  velero.io/resource-timeout=10m0s
+              velero.io/source-cluster-k8s-gitversion=v1.26.15
+              velero.io/source-cluster-k8s-major-version=1
+              velero.io/source-cluster-k8s-minor-version=26
+
+Phase:  Completed
+
+
+Namespaces:
+  Included:  *
+  Excluded:  <none>
+
+Resources:
+  Included:        *
+  Excluded:        <none>
+  Cluster-scoped:  auto
+
+Label selector:  <none>
+
+Or label selector:  <none>
+
+Storage Location:  default
+
+Velero-Native Snapshot PVs:  auto
+Snapshot Move Data:          false
+Data Mover:                  velero
+
+TTL:  720h0m0s
+
+CSISnapshotTimeout:    10m0s
+ItemOperationTimeout:  4h0m0s
+
+Hooks:  <none>
+
+Backup Format Version:  1.1.0
+
+Started:    2024-07-13 00:56:04 +0000 UTC
+Completed:  2024-07-13 00:56:08 +0000 UTC
+
+Expiration:  2024-08-12 00:56:04 +0000 UTC
+
+Total items to be backed up:  675
+Items backed up:              675
+
+Backup Volumes:
+  Velero-Native Snapshots:
+    pvc-8e0b07ce-33a1-46e2-9065-7847b44717b0: specify --details for more information
+
+  CSI Snapshots: <none included>
+
+  Pod Volume Backups: <none included>
+
+HooksAttempted:  0
+HooksFailed:     0
+
+
+
+#### Step 5: Do an intentional database corruption to the mysql db in existing setup
+
+kubectl exec -it weatherapp-auth-mysql-0 -- mysql -u root -p
+Defaulted container "mysql" out of: mysql, preserve-logs-symlinks (init)
+Enter password: 
+Welcome to the MySQL monitor.  Commands end with ; or \g.
+Your MySQL connection id is 208
+Server version: 8.4.0 Source distribution
+
+Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+
+Oracle is a registered trademark of Oracle Corporation and/or its
+affiliates. Other names may be trademarks of their respective
+owners.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+mysql> show databases;
++--------------------+
+| Database           |
++--------------------+
+| auth               |
+| information_schema |
+| my_database        |
+| mysql              |
+| performance_schema |
+| sys                |
++--------------------+
+6 rows in set (0.02 sec)
+
+mysql> drop database auth;
+Query OK, 1 row affected (0.03 sec)
+
+mysql> show databases;
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
+| my_database        |
+| mysql              |
+| performance_schema |
+| sys                |
++--------------------+
+5 rows in set (0.00 sec)
+
+
+
+Confirm that user can no longer login.
+"Invalid Credentials" shold be shown.
+
+
+#### Step 6: Restore the setup with the velero backup
+
+BEFORE restoring must do two things:
+
+Delete the current stateful set and then delete the pvc::
+This is because Velero does not restore items that are not missing. Remvoing the pvc will force velero to replace it from the backup when doing the retore (see further below)
+
+kubectl get pvc
+NAME                           STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS    AGE
+data-weatherapp-auth-mysql-0   Bound    pvc-8e0b07ce-33a1-46e2-9065-7847b44717b0   8Gi        RWO            kops-csi-1-21   21m
+
+kubectl get sts
+NAME                    READY   AGE
+weatherapp-auth-mysql   1/1     22m
+
+
+kubectl delete sts weatherapp-auth-mysql
+statefulset.apps "weatherapp-auth-mysql" deleted
+
+kubectl get sts
+No resources found in default namespace.
+
+
+
+
+ kubectl get pvc
+NAME                           STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS    AGE
+data-weatherapp-auth-mysql-0   Bound    pvc-8e0b07ce-33a1-46e2-9065-7847b44717b0   8Gi        RWO            kops-csi-1-21   23m
+
+
+kubectl delete pvc data-weatherapp-auth-mysql-0
+persistentvolumeclaim "data-weatherapp-auth-mysql-0" deleted
+
+
+kubectl get pvc
+No resources found in default namespace.
+
+
+
+NEXT:
+Do the restoration::  (NOTE: there are some warnings as the complete setup is not able to be restored. Velero only restores missing/changed items not items that have not changed)
+
+
+
+velero restore create golden-restore2 --from-backup golden-backup2
+Restore request "golden-restore2" submitted successfully.
+Run `velero restore describe golden-restore2` or `velero restore logs golden-restore2` for more details.
+
+
+
+velero restore describe golden-restore2
+Name:         golden-restore2
+Namespace:    velero
+Labels:       <none>
+Annotations:  <none>
+
+Phase:                       Completed
+Total items to be restored:  408
+Items restored:              408
+
+Started:    2024-07-13 01:08:30 +0000 UTC
+Completed:  2024-07-13 01:08:39 +0000 UTC
+
+Warnings:
+  Velero:     <none>
+  Cluster:  could not restore, CustomResourceDefinition "backuprepositories.velero.io" already exists. Warning: the in-cluster version is different than the backed-up version
+            
+            <<< EDITED TO SAVE SPACE>>>
+  Namespaces:
+    kube-node-lease:  could not restore, Lease "i-074ff0302bda34b67" already exists. Warning: the in-cluster version is different than the backed-up version
+                      could not restore, Lease "i-0e62e1d6955321f2d" already exists. Warning: the in-cluster version is different than the backed-up version
+    kube-system:      could not restore, Pod "aws-cloud-controller-manager-wsttq" already exists. Warning: the in-cluster version is different than the backed-up version
+                      
+                      <<< EDITE TO SAVE SPACE>>>
+
+Backup:  golden-backup2
+
+Namespaces:
+  Included:  all namespaces found in the backup
+  Excluded:  <none>
+
+Resources:
+  Included:        *
+  Excluded:        nodes, events, events.events.k8s.io, backups.velero.io, restores.velero.io, resticrepositories.velero.io, csinodes.storage.k8s.io, volumeattachments.storage.k8s.io, backuprepositories.velero.io
+  Cluster-scoped:  auto
+
+Namespace mappings:  <none>
+
+Label selector:  <none>
+
+Or label selector:  <none>
+
+Restore PVs:  auto
+
+CSI Snapshot Restores: <none included>
+
+Existing Resource Policy:   <none>
+ItemOperationTimeout:       4h0m0s
+
+Preserve Service NodePorts:  auto
+
+Uploader config:
+
+
+HooksAttempted:   0
+HooksFailed:      0
+
+
+#### Step 7: Test the app and the original user should be able to log in again.
+
+
+
+
+
+
+
+
+### CLUSTER MIGRATION TO A NEW CLUSTER INFRA:
