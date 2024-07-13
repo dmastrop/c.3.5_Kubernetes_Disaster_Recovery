@@ -1,0 +1,6 @@
+# Velero for cluster disaster recovery with EKS cluster and with kops cluster
+
+## EKS Cluster (using velero client and velero server, but using helm to install the velero server)
+
+
+## kops cluster (using velero client and velero server)
