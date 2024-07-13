@@ -3,4 +3,20 @@
 ## EKS Cluster (using velero client and velero server, but using helm to install the velero server)
 
 
+### backup and restore
+
+
+
+### cluster migration to new cluster
+
+
+
+
+
 ## kops cluster (using velero client and velero server)
+
+
+### backup and restore
+
+
+### cluster migration to new cluster
