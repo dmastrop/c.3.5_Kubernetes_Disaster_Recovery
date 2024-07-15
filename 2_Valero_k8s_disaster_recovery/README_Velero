@@ -1244,15 +1244,6 @@ I had to delete cluster2 in order for cluster1 kops to complete the delete. In r
 
 
 
-ubuntu@ip-172-31-21-52:~/course3_projects/5_Disaster_Recovery/2_Valero_k8s_disaster_recovery/kops_method$ ls -la
-total 20
-drwxrwxr-x 2 ubuntu ubuntu 4096 Jul 15 02:34 .
-drwxrwxr-x 4 ubuntu ubuntu 4096 Jul 13 03:09 ..
--rw-rw-r-- 1 ubuntu ubuntu  112 Jul 12 02:19 credentials-velero
--rw-rw-r-- 1 ubuntu ubuntu 1019 Jul 15 02:34 velero-policy-addAttachVolume.json
--rw-rw-r-- 1 ubuntu ubuntu 1019 Jul 12 02:18 velero-policy.json
-
-
 
 
 
