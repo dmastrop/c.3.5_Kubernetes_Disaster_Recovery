@@ -10,13 +10,13 @@ NOTE: use the EKS controller course3_COMPLETE_kops_from_course8_project14_kops_s
 
 ## EKS Cluster (using velero client and velero server, but using helm to install the velero server)
 
+NOTE: there is a defect in the goland microservices module whereby the mysql pod panics and crashes and thus the weatherapp-auth pods are stuck in CrashLoopBackup because mysql db cannot come up.   So will not actually be able to verify this functionally on EKS setup.  I did verify this on the kops cluster setup (Non-EKS). See Next ## SECTIONS below.
 
-### backup and restore setup with Velero on EKS cluster
+### BACKUP AND RESTORE SETUP WITH VELERO ON EKS CLUSTER:
 
 
 
-### cluster migration to new cluster
-
+### CLUSTER MIGRATION (DATA MIGRATION) TO A NEW CLUSTER USING EKS CLUSTERS:
 
 
 
