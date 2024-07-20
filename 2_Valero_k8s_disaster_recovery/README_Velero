@@ -12,7 +12,695 @@ NOTE: use the EKS controller course3_COMPLETE_kops_from_course8_project14_kops_s
 
 NOTE: there is a defect in the goland microservices module whereby the mysql pod panics and crashes and thus the weatherapp-auth pods are stuck in CrashLoopBackup because mysql db cannot come up.   So will not actually be able to verify this functionally on EKS setup.  I did verify this on the kops cluster setup (Non-EKS). See Next ## SECTIONS below.
 
+Reference link with updated script and yaml files:
+https://aws.amazon.com/blogs/containers/backup-and-restore-your-amazon-eks-cluster-resources-using-velero/
+
+
+
+
 ### BACKUP AND RESTORE SETUP WITH VELERO ON EKS CLUSTER:
+
+
+
+#### Step 0: EKS cluster setup
+
+Get the EKS cluster up and running first
+
+
+eksctl create cluster -f cluster.yaml
+
+NOTE: I have added the version in the yaml file. This is used to troubleshoot issues between the kops cluster and the EKS cluster setups (for example the mysql goland panic/crash issue only on EKS).   I determined it is NOT the kubernetes version itself. EKS might be missing dependency files to run the golang code.  This issue is still open.
+
+
+ubuntu@ip-172-31-21-52:~/course3_eksctl$ kubectl get node -o wide
+NAME                             STATUS   ROLES    AGE   VERSION                INTERNAL-IP      EXTERNAL-IP      OS-IMAGE         KERNEL-VERSION                  CONTAINER-RUNTIME
+ip-192-168-0-23.ec2.internal     Ready    <none>   13m   v1.26.15-eks-ae9a62a   192.168.0.23     44.204.200.148   Amazon Linux 2   5.10.219-208.866.amzn2.x86_64   containerd://1.7.11
+ip-192-168-33-103.ec2.internal   Ready    <none>   13m   v1.26.15-eks-ae9a62a   192.168.33.103   3.85.121.1       Amazon Linux 2   5.10.219-208.866.amzn2.x86_64   containerd://1.7.11
+ip-192-168-51-208.ec2.internal   Ready    <none>   13m   v1.26.15-eks-ae9a62a   192.168.51.208   54.156.79.81     Amazon Linux 2   5.10.219-208.866.amzn2.x86_64   containerd://1.7.11
+
+
+NOTE that there are issues (bug) with the EKS cluster delete. This command with flag will resolve this issue:
+
+eksctl delete cluster -f cluster.yaml --disable-nodegroup-eviction
+
+
+eksctl delete cluster --disable-nodegroup-eviction or eksctl delete nodegroup --disable-eviction.
+
+
+#### Step 1: S3 bucket
+
+Make sure that this has been created. I am using the same S3 bucket for both EKS and Non-EKS Velero testing.
+
+
+
+#### Step 2: Velero client installation. 
+
+This has already been instaled on the EC2 controller from the kops exercise.   
+
+installing client side (CLI) 1.14.0 
+wget https://github.com/vmware-tanzu/velero/releases/download/v1.14.0/velero-v1.14.0-linux-amd64.tar.gz
+tar -xvf velero-v1.14.0-linux-amd64.tar.gz 
+sudo mv velero-v1.14.0-linux-amd64/velero /usr/local/bin
+velero version
+
+
+Initially before the Velero server is installed on the EKS cluster, the velero version will show error for the server porition. This will be corrected once the velero server is installed on the client. With kops I used velero client to install the server
+
+
+NOTE: FOR EKS will use helm to install the velero server. The latest version is 1.14.0.  This requires a provisioned IAM role with proper permissions in the values.yaml file. The role and policy need to be created first prior to installing velero server with helm. See next steps below.
+
+#### Step 3: Create a policy from the velero_policy.json file on the EC2 controller. The policy json file is below.  Note this defines the actions that will be permitted on the recovery.holinessinloveofchrist.com S3 bucket for the backup and restore operations.
+
+
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ec2:DescribeVolumes",
+                "ec2:DescribeSnapshots",
+                "ec2:CreateTags",
+                "ec2:CreateVolume",
+                "ec2:CreateSnapshot",
+                "ec2:DeleteSnapshot"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:DeleteObject",
+                "s3:PutObject",
+                "s3:AbortMultipartUpload",
+                "s3:ListMultipartUploadParts"
+            ],
+            "Resource": [
+                "arn:aws:s3:::recovery.holinessinloveofchrist.com/*"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket"
+            ],
+            "Resource": [
+                "arn:aws:s3:::recovery.holinessinloveofchrist.com"
+            ]
+        }
+    ]
+}
+
+
+
+#### Step 4: Create the policy via aws cli using the json file above. This is a customer managed policy and has already been created from previous executions. This only needs to be done once.  The name of the policy is VeleroAccessPolicy
+
+
+aws iam create-policy --policy-name VeleroAccessPolicy --policy-document file://velero_policy.json 
+
+
+
+
+
+#### Step 5: Create a role and attach this policy to it and Link the role to a service account on the EKS cluster (see below; one command can be done to all of this)
+
+NOTE: from the cluster.yaml file that created the EKS cluster, the cluster name is "cluster2"
+
+kubectl config get-contexts
+CURRENT   NAME                                                        CLUSTER                        AUTHINFO                                                    NAMESPACE
+*         kops-project14-EC2-IAM-admin@cluster2.us-east-1.eksctl.io   cluster2.us-east-1.eksctl.io   kops-project14-EC2-IAM-admin@cluster2.us-east-1.eksctl.io   
+
+
+NOTE: velero-server will be the service account name
+
+
+NOTE: role name will be eks-velero-backup
+
+Get the arn of the VeleroAccessPolicy created in the preceeding step:
+This can be retrieved from AWS console:   arn:aws:iam::590183769797:policy/VeleroAccessPolicy
+
+
+The full command to create this service account velero-server and role name eks-velero-backup and bind it to the policy VeleroAccessPollicy is below. This must be done in the velero namespace because that is where the velero server will be installed on this EKS cluster.
+
+eksctl create iamserviceaccount --cluster=cluster2 --name=velero-server --namespace=velero --role-name=eks-velero-backup --role-only --attach-policy-arn=arn:aws:iam::590183769797:policy/VeleroAccessPolicy --approve
+
+
+#### Step 6: apply the eksctl command above. Note that an IAM Open ID Connect provider must be created first that is assciated with cluster2. See below
+
+
+
+eksctl create iamserviceaccount --cluster=cluster2 --name=velero-server --namespace=velero --role-name=eks-velero-backup --role-only --attach-policy-arn=arn:aws:iam::590183769797:policy/VeleroAccessPolicy --approve
+
+2024-07-19 20:18:10 [!]  no IAM OIDC provider associated with cluster, try 'eksctl utils associate-iam-oidc-provider --region=us-east-1 --cluster=cluster2'
+Error: unable to create iamserviceaccount(s) without IAM OIDC provider enabled
+
+
+eksctl utils associate-iam-oidc-provider --region=us-east-1 --cluster=cluster2
+2024-07-19 20:18:42 [ℹ]  (plan) would create IAM Open ID Connect provider for cluster "cluster2" in "us-east-1"
+2024-07-19 20:18:42 [!]  no changes were applied, run again with '--approve' to apply the changes
+
+
+eksctl utils associate-iam-oidc-provider --region=us-east-1 --cluster=cluster2 --approve
+2024-07-19 20:19:00 [ℹ]  will create IAM Open ID Connect provider for cluster "cluster2" in "us-east-1"
+2024-07-19 20:19:00 [✔]  created IAM Open ID Connect provider for cluster "cluster2" in "us-east-1"
+
+
+Finally apply the eksctl command to create the service account with the role that has the VeleroAccessPolicy attached to it:
+
+
+eksctl create iamserviceaccount --cluster=cluster2 --name=velero-server --namespace=velero --role-name=eks-velero-backup --role-only --attach-policy-arn=arn:aws:iam::590183769797:policy/VeleroAccessPolicy --approve
+
+
+2024-07-19 20:22:36 [ℹ]  1 iamserviceaccount (velero/velero-server) was included (based on the include/exclude rules)
+2024-07-19 20:22:36 [!]  serviceaccounts in Kubernetes will not be created or modified, since the option --role-only is used
+2024-07-19 20:22:36 [ℹ]  1 task: { create IAM role for serviceaccount "velero/velero-server" }
+2024-07-19 20:22:36 [ℹ]  building iamserviceaccount stack "eksctl-cluster2-addon-iamserviceaccount-velero-velero-server"
+2024-07-19 20:22:36 [ℹ]  deploying stack "eksctl-cluster2-addon-iamserviceaccount-velero-velero-server"
+2024-07-19 20:22:36 [ℹ]  waiting for CloudFormation stack "eksctl-cluster2-addon-iamserviceaccount-velero-velero-server"
+2024-07-19 20:23:06 [ℹ]  waiting for CloudFormation stack "eksctl-cluster2-addon-iamserviceaccount-velero-velero-server"
+
+
+
+
+The service account velero/velero-server has been created on the cluster with the necessary role/prolicy to perform actions on the backup and restore S3 bucket!!!!!
+
+
+
+
+#### Step 7: Finally at this point install the velero server onto the EKS cluster2.  This will use the values.yaml file on the controller.
+
+The values.yaml file for helm is below:
+The arn of the role can be found on AWS console (make sure to hit the refresh button to see the role)
+
+
+NOTE: the values.yaml file (the original values.yaml file was out of date, the updated version with map to slice syntax and provider per block (backup storage location and volume snapshot location blocks) is below)
+
+
+configuration:
+  backupStorageLocation:
+    # s3 bucket was created earlier
+  - bucket: recovery.holinessinloveofchrist.com
+    provider: aws
+
+
+  volumeSnapshotLocation:
+  - config:
+      region: us-east-1
+    provider: aws
+
+
+credentials:
+  useSecret: false
+
+
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.2.0
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+
+serviceAccount:
+  server:
+    annotations:
+      # this can be found in AWS; the role that we created and linked to the service account
+      eks.amazonaws.com/role-arn: "arn:aws:iam::xxxxxxxxxxx:role/eks-velero-backup"
+
+
+#### Step 8: Run the helm command to install the server on the velero namespace on the EKS cluster2
+
+
+First add the velero helm charts to the helm repo
+
+helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+
+helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+"vmware-tanzu" already exists with the same configuration, skipping
+
+
+helm repo list
+NAME                    URL                                                 
+bitnami                 https://charts.bitnami.com/bitnami                  
+aws-ebs-csi-driver      https://kubernetes-sigs.github.io/aws-ebs-csi-driver
+vmware-tanzu            https://vmware-tanzu.github.io/helm-charts   
+
+
+
+Next, do velero server install with helm:
+
+
+On the EC2 controller the project directory is here:
+/home/ubuntu/course3_projects/5_Disaster_Recovery/2_Valero_k8s_disaster_recovery
+
+
+helm install velero vmware-tanzu/velero --create-namespace --namespace velero -f values.yaml
+
+
+
+helm install velero vmware-tanzu/velero --create-namespace --namespace velero -f values.yaml
+NAME: velero
+LAST DEPLOYED: Fri Jul 19 20:38:30 2024
+NAMESPACE: velero
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+Check that the velero is up and running:
+
+    kubectl get deployment/velero -n velero
+
+Check that the secret has been created:
+
+    kubectl get secret/velero -n velero
+
+Once velero server is up and running you need the client before you can use it
+1. wget https://github.com/vmware-tanzu/velero/releases/download/v1.14.0/velero-v1.14.0-darwin-amd64.tar.gz
+2. tar -xvf velero-v1.14.0-darwin-amd64.tar.gz -C velero-client
+
+More info on the official site: https://velero.io/docs
+
+
+
+NOTE: the velero client is already installed.
+
+
+#### Step 9: NOTE the differences in installing velero server on kops cluster vs. EKS cluster.
+
+NOTE: with kops I used the following to install the Velero server on the kops cluster
+
+velero install \
+--provider aws \
+--plugins velero/velero-plugin-for-aws:v1.10.0 \
+--bucket $BUCKET \
+--backup-location-config region=$REGION \
+--snapshot-location-config region=$REGION \
+--secret-file ./credentials-velero
+
+
+
+#### Step 10: Velero server verification on the EKS cluster.
+
+
+Velero server is deployed as a pod on the cluster
+
+
+kubectl get deployment -n velero
+
+NAME     READY   UP-TO-DATE   AVAILABLE   AGE
+velero   1/1     1            1           9m51s
+
+kubectl get ns
+
+NAME              STATUS   AGE
+default           Active   94m
+kube-node-lease   Active   94m
+kube-public       Active   94m
+kube-system       Active   94m
+velero            Active   10m
+
+
+kubectl get pod -n velero
+
+NAME                      READY   STATUS    RESTARTS   AGE
+velero-66cc49ff84-7n4ww   1/1     Running   0          10m
+
+
+Velero version client should now show the server version
+
+
+velero version
+Client:
+        Version: v1.14.0
+        Git commit: 2fc6300f2239f250b40b0488c35feae59520f2d3
+Server:
+        Version: v1.14.0
+
+
+
+
+
+#### Step 11: Get the weatherapp up and running via helm.
+
+Get the weatherapp microservices app up and running on the EKS cluster. 
+
+NOTE there is defect whereby the mysql pod panics. Something in the golang code. (it works on kops cluster so there might be a dependency missing on the EKS cluster setup. I have tried all recent versions of k8s and it is not as simple as that. )
+
+
+The working directory of the helm source code/charts is located here on the controller:
+
+
+ pwd
+
+/home/ubuntu/course3_projects/4_CICD_EKS_Gitlab/source_files/weatherapp
+
+ ls -la
+total 60
+drwxrwxr-x 14 ubuntu ubuntu 4096 Jul 18 23:08 .
+drwxrwxr-x  3 ubuntu ubuntu 4096 Jun 18 02:01 ..
+drwxrwxr-x  5 ubuntu ubuntu 4096 Jun 18 02:01 ORIGINAL_SOURCE_helm_charts
+drwxrwxr-x  3 ubuntu ubuntu 4096 Jun 18 02:01 UI
+drwxrwxr-x  4 ubuntu ubuntu 4096 Jun 18 02:01 auth
+drwxr-xr-x  8 lxd    root   4096 Jun 18 18:25 db-data
+-rw-rw-r--  1 ubuntu ubuntu 1321 Jun 18 02:01 docker-compose.yaml
+drwxrwxr-x  3 ubuntu ubuntu 4096 Jun 20 20:07 gitlab_kops_cert_user
+drwxrwxr-x  2 ubuntu ubuntu 4096 Jun 20 21:17 gitlab_kops_cert_user1
+drwxrwxr-x  3 ubuntu ubuntu 4096 Jul 18 01:41 gitlab_kops_cert_user2_cluster2
+drwxrwxr-x  2 ubuntu ubuntu 4096 Jul 19 00:10 gitlab_kops_cert_user3_cluster2
+drwxrwxr-x  2 ubuntu ubuntu 4096 Jun 18 02:01 weather
+drwxrwxr-x  6 ubuntu ubuntu 4096 Jul  1 21:35 weatherapp-auth
+drwxrwxr-x  3 ubuntu ubuntu 4096 Jun 18 02:01 weatherapp-ui
+drwxrwxr-x  3 ubuntu ubuntu 4096 Jun 18 02:01 weatherapp-weather
+
+
+
+Run the helm charts for the 3 microservices::
+
+install the weatherapp on the EKS cluster using helm
+
+
+helm upgrade --install weatherapp-auth --set mysql.auth.rootPassword=mystrongpassword .
+
+
+This is due to the aforementioned panic issue. This works with kops cluster.
+
+ubuntu@ip-172-31-21-52:~/course3_projects/4_CICD_EKS_Gitlab/source_files/weatherapp/weatherapp-auth$ kubectl get pod
+NAME                               READY   STATUS             RESTARTS      AGE
+weatherapp-auth-76c8df5d6b-ckf7q   0/1     CrashLoopBackOff   1 (20s ago)   22s
+weatherapp-auth-76c8df5d6b-tg457   0/1     CrashLoopBackOff   1 (18s ago)   22s
+weatherapp-auth-mysql-0            0/1     Pending            0             22s
+
+
+
+cd ..
+
+helm upgrade --install weatherapp-ui .
+
+
+
+ kubectl get pod
+NAME                               READY   STATUS             RESTARTS      AGE
+weatherapp-auth-76c8df5d6b-ckf7q   0/1     CrashLoopBackOff   4 (20s ago)   109s
+weatherapp-auth-76c8df5d6b-tg457   0/1     CrashLoopBackOff   3 (48s ago)   109s
+weatherapp-auth-mysql-0            0/1     Pending            0             109s
+weatherapp-ui-5bd8dcc685-h5ldx     1/1     Running            0             21s
+weatherapp-ui-5bd8dcc685-slm92     1/1     Running            0             21s
+ubuntu@ip-172-31-21-52:~/course3_projects/4_CICD_EKS_Gitlab/source_files/weathera
+
+
+
+
+cd ..
+
+
+helm upgrade --install weatherapp-weather --set apikey=6eafbb0c45msh451df8302c291f2p1e0a35jsnf98732edea29 .
+
+
+kubectl get pod
+NAME                                  READY   STATUS             RESTARTS      AGE
+weatherapp-auth-76c8df5d6b-ckf7q      0/1     CrashLoopBackOff   5 (9s ago)    3m11s
+weatherapp-auth-76c8df5d6b-tg457      0/1     CrashLoopBackOff   4 (81s ago)   3m11s
+weatherapp-auth-mysql-0               0/1     Pending            0             3m11s
+weatherapp-ui-5bd8dcc685-h5ldx        1/1     Running            0             103s
+weatherapp-ui-5bd8dcc685-slm92        1/1     Running            0             103s
+weatherapp-weather-77b797b646-n5zc5   1/1     Running            0             48s
+weatherapp-weather-77b797b646-trr6w   1/1     Running            0             48s
+
+
+
+
+
+
+#### Step 12: Finally ready to do a backup and restore of the cluster
+
+NOTE: BECAUSE of the crash issue we cannot test the backup and restore functinally but can veriify it through the kubectl describe command (see below)
+
+There are four backups in the backup folder in the S3 bucket.(These are from the kops cluster backups)
+Use golden-backup5 as the backup image for the EKS cluster
+
+
+
+velero backup create golden-backup5
+
+
+ velero backup create golden-backup5
+Backup request "golden-backup5" submitted successfully.
+Run `velero backup describe golden-backup5` or `velero backup logs golden-backup5` for more details.
+
+
+
+##### velero backup describe golden-backup5
+Name:         golden-backup5
+Namespace:    velero
+Labels:       velero.io/storage-location=default
+Annotations:  velero.io/resource-timeout=10m0s
+              velero.io/source-cluster-k8s-gitversion=v1.26.15-eks-db838b0
+              velero.io/source-cluster-k8s-major-version=1
+              velero.io/source-cluster-k8s-minor-version=26+
+
+Phase:  Completed     <<<<<<<<<<<<<<<
+
+
+Warnings:
+  Velero:     <none>
+  Cluster:    <none>
+  Namespaces:
+    default:   resource: /persistentvolumeclaims name: /data-weatherapp-auth-mysql-0 message: /unable to get PV name, skip tracking. error: /PV name is not set in PVC 
+                                                        <<<< this is because of the pod crash/panic. The PVC is stuck in pending state and so there is no PV. On the working kops setup you will not see this.
+Namespaces:
+  Included:  *
+  Excluded:  <none>
+
+Resources:
+  Included:        *
+  Excluded:        <none>
+  Cluster-scoped:  auto
+
+Label selector:  <none>
+
+Or label selector:  <none>
+
+Storage Location:  default
+
+Velero-Native Snapshot PVs:  auto
+Snapshot Move Data:          false
+Data Mover:                  velero
+
+TTL:  720h0m0s
+
+CSISnapshotTimeout:    10m0s
+ItemOperationTimeout:  4h0m0s
+
+Hooks:  <none>
+
+Backup Format Version:  1.1.0
+
+Started:    2024-07-19 23:07:05 +0000 UTC
+Completed:  2024-07-19 23:07:09 +0000 UTC
+
+Expiration:  2024-08-18 23:07:05 +0000 UTC
+
+Total items to be backed up:  430
+Items backed up:              430   <<<<<<<<<<<<<<
+
+Backup Volumes:
+  Velero-Native Snapshots: <none included>
+
+  CSI Snapshots: <none included>
+
+  Pod Volume Backups: <none included>
+
+HooksAttempted:  0
+HooksFailed:     0
+
+
+
+
+#### Step 13: Do a restore of the cluster with the backup that was just created (golden-backup5). With the kops working setup we are able to intentinally corrupt the mysql database after taking the backup so that the restore will make a functionl difference. We can do the same here, but cannot actually test it from the browser.(see kops setup for how to do this)
+
+
+
+Here is the current state of the pods and services prior to the restore
+
+
+ kubectl get pod
+NAME                                  READY   STATUS             RESTARTS         AGE
+weatherapp-auth-76c8df5d6b-ckf7q      0/1     CrashLoopBackOff   35 (3m26s ago)   157m
+weatherapp-auth-76c8df5d6b-tg457      0/1     CrashLoopBackOff   35 (3m9s ago)    157m
+weatherapp-auth-mysql-0               0/1     Pending            0                157m
+weatherapp-ui-5bd8dcc685-h5ldx        1/1     Running            0                156m
+weatherapp-ui-5bd8dcc685-slm92        1/1     Running            0                156m
+weatherapp-weather-77b797b646-n5zc5   1/1     Running            0                155m
+weatherapp-weather-77b797b646-trr6w   1/1     Running            0                155m
+
+ kubectl get svc
+NAME                             TYPE           CLUSTER-IP       EXTERNAL-IP                                                              PORT(S)        AGE
+kubernetes                       ClusterIP      10.100.0.1       <none>                                                                   443/TCP        4h28m
+weatherapp-auth                  ClusterIP      10.100.20.94     <none>                                                                   8080/TCP       158m
+weatherapp-auth-mysql            ClusterIP      10.100.215.188   <none>                                                                   3306/TCP       158m
+weatherapp-auth-mysql-headless   ClusterIP      None             <none>                                                                   3306/TCP       158m
+weatherapp-ui                    LoadBalancer   10.100.93.145    a4cd012e1708944b5937f35f1b365f62-212227075.us-east-1.elb.amazonaws.com   80:32209/TCP   156m
+weatherapp-weather               ClusterIP      10.100.33.222    <none>                                                                   5000/TCP       156m
+
+
+
+
+#### Step 14: Before restoring must delete the stateful set (sts) and the PVC
+
+The reasoning is that Velero does not overwrite exsiting items when doing the restore.   This will force velero to replace the PVC and create a new sts.
+
+Current PVC and sts:
+
+kubectl get sts
+NAME                    READY   AGE
+weatherapp-auth-mysql   0/1     165m
+
+kubectl get pvc
+NAME                           STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+data-weatherapp-auth-mysql-0   Pending                                      gp2            165m
+
+
+
+
+ kubectl delete sts weatherapp-auth-mysql
+statefulset.apps "weatherapp-auth-mysql" deleted
+
+ kubectl get sts
+No resources found in default namespace.
+
+kubectl delete pvc data-weatherapp-auth-mysql-0 
+persistentvolumeclaim "data-weatherapp-auth-mysql-0" deleted
+
+kubectl get pvc
+No resources found in default namespace.
+
+
+##### As expected there is no longer a mysql pod running
+
+
+ kubectl get pods
+NAME                                  READY   STATUS             RESTARTS       AGE
+weatherapp-auth-76c8df5d6b-ckf7q      0/1     CrashLoopBackOff   38 (94s ago)   171m
+weatherapp-auth-76c8df5d6b-tg457      0/1     CrashLoopBackOff   38 (87s ago)   171m
+weatherapp-ui-5bd8dcc685-h5ldx        1/1     Running            0              170m
+weatherapp-ui-5bd8dcc685-slm92        1/1     Running            0              170m
+weatherapp-weather-77b797b646-n5zc5   1/1     Running            0              169m
+weatherapp-weather-77b797b646-trr6w   1/1     Running            0              169m
+
+
+#### Step 15:  Restore the cluster with golden-backup5
+
+velero restore create golden-restore-eks1 --from-backup golden-backup5
+
+
+velero restore create golden-restore-eks1 --from-backup golden-backup5
+Restore request "golden-restore-eks1" submitted successfully.
+Run `velero restore describe golden-restore-eks1` or `velero restore logs golden-restore-eks1` for more details
+
+
+##### velero restore describe golden-restore-eks1
+
+The warnings below are normal.
+
+ velero restore describe golden-restore-eks1
+Name:         golden-restore-eks1
+Namespace:    velero
+Labels:       <none>
+Annotations:  <none>
+
+Phase:                       Completed
+Total items to be restored:  410
+Items restored:              410   <<<<<<<<<<<<<<<<<<<<<<<<
+
+Started:    2024-07-20 00:00:08 +0000 UTC
+Completed:  2024-07-20 00:00:15 +0000 UTC
+
+Warnings:
+  Velero:     <none>
+  Cluster:  could not restore, CustomResourceDefinition "backuprepositories.velero.io" already exists. Warning: the in-cluster version is different than the backed-up version
+            could not restore, CustomResourceDefinition "backups.velero.io" already exists. Warning: the in-cluster version is different than the backed-up version
+            could not restore, CustomResourceDefinition "backupstoragelocations.velero.io" already exists. Warning: the in-cluster version is different than the backed-up version
+
+            <<< EDITED TO SAVE SPACE>>>
+
+
+
+Backup:  golden-backup5
+
+Namespaces:
+  Included:  all namespaces found in the backup
+  Excluded:  <none>
+
+Resources:
+  Included:        *
+  Excluded:        nodes, events, events.events.k8s.io, backups.velero.io, restores.velero.io, resticrepositories.velero.io, csinodes.storage.k8s.io, volumeattachments.storage.k8s.io, backuprepositories.velero.io
+  Cluster-scoped:  auto
+
+Namespace mappings:  <none>
+
+Label selector:  <none>
+
+Or label selector:  <none>
+
+Restore PVs:  auto
+
+CSI Snapshot Restores: <none included>
+
+Existing Resource Policy:   <none>
+ItemOperationTimeout:       4h0m0s
+
+Preserve Service NodePorts:  auto
+
+Uploader config:
+
+
+HooksAttempted:   0
+HooksFailed:      0
+
+
+
+
+
+
+#### Step 16: verify that the mysql pod is back up (even though it cannot run properly on EKS)
+
+kubectl get pod
+NAME                                  READY   STATUS             RESTARTS         AGE
+weatherapp-auth-76c8df5d6b-ckf7q      0/1     CrashLoopBackOff   39 (4m34s ago)   179m
+weatherapp-auth-76c8df5d6b-tg457      0/1     CrashLoopBackOff   39 (4m28s ago)   179m
+weatherapp-auth-mysql-0               0/1     Pending            0                4m20s  <<< new pod created from the backup
+weatherapp-ui-5bd8dcc685-h5ldx        1/1     Running            0                178m
+weatherapp-ui-5bd8dcc685-slm92        1/1     Running            0                178m
+weatherapp-weather-77b797b646-n5zc5   1/1     Running            0                177m
+weatherapp-weather-77b797b646-trr6w   1/1     Running            0                177m
+
+
+##### verify sts and pvc are there as well (even though PVC is stuck in pending state)
+
+kubectl get sts
+NAME                    READY   AGE
+weatherapp-auth-mysql   0/1     5m48s
+
+
+
+kubectl get pvc
+NAME                           STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+data-weatherapp-auth-mysql-0   Pending                                      gp2            5m59s
+
+
+#### Step 18:  there is a completely new volume attached to the mysql pod in the working scenario (see kops setup below)
+ This would be visible in the following command for the ebs controller
+
+ kubectl logs ebs-csi-controller-55cb6776b4-4x2f6 -n kube-system
+
+
+
+#### Step 19: for full functional setup verification see the kops setup and testing for this backup and restore in the relevant section below
+
+
+
+
 
 
 
@@ -362,6 +1050,7 @@ Confirm that user can no longer login.
 BEFORE restoring must do two things:
 
 Delete the current stateful set and then delete the pvc::
+
 This is because Velero does not restore items that are not missing. Remvoing the pvc will force velero to replace it from the backup when doing the retore (see further below)
 
 kubectl get pvc
@@ -430,7 +1119,7 @@ Warnings:
                       could not restore, Lease "i-0e62e1d6955321f2d" already exists. Warning: the in-cluster version is different than the backed-up version
     kube-system:      could not restore, Pod "aws-cloud-controller-manager-wsttq" already exists. Warning: the in-cluster version is different than the backed-up version
                       
-                      <<< EDITE TO SAVE SPACE>>>
+                      <<< EDITED TO SAVE SPACE>>>
 
 Backup:  golden-backup2
 
@@ -465,7 +1154,98 @@ HooksAttempted:   0
 HooksFailed:      0
 
 
-#### Step 7: Test the app and the original user should be able to log in again.
+
+#### Step 7: note the PVC and sts and the volume that is bound is a new volume as expected
+
+
+
+##### The pvc and sts are restored
+
+
+ubuntu@ip-172-31-21-52:~/course3_projects/5_Disaster_Recovery/2_Valero_k8s_disaster_recovery/kops_method$ kubectl get pvc
+NAME                           STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS    AGE
+data-weatherapp-auth-mysql-0   Bound    pvc-bf3b0ac3-5caa-4a22-96f5-6475bb122405   8Gi        RWO            kops-csi-1-21   37s
+ubuntu@ip-172-31-21-52:~/course3_projects/5_Disaster_Recovery/2_Valero_k8s_disaster_recovery/kops_method$ kubectl get sts
+NAME                    READY   AGE
+weatherapp-auth-mysql   1/1     35s
+
+
+Look at the pods
+
+
+##### Note mysql pod was recreated (see time stamp)
+
+
+ubuntu@ip-172-31-21-52:~/course3_projects/5_Disaster_Recovery/2_Valero_k8s_disaster_recovery/kops_method$ kubectl get pods
+NAME                                  READY   STATUS    RESTARTS        AGE
+weatherapp-auth-76c8df5d6b-28s2m      1/1     Running   3 (3h45m ago)   3h47m
+weatherapp-auth-76c8df5d6b-ph2qd      1/1     Running   3 (3h45m ago)   3h47m
+weatherapp-auth-mysql-0               1/1     Running   0               2m17s
+weatherapp-ui-5bd8dcc685-clc76        1/1     Running   0               3h38m
+weatherapp-ui-5bd8dcc685-fqfp5        1/1     Running   0               3h38m
+weatherapp-weather-77b797b646-jfrcc   1/1     Running   0               3h37m
+weatherapp-weather-77b797b646-lt74d   1/1     Running   0               3h37m
+
+
+##### NOTE a new volume is created and bound to the node (PVC)
+
+
+ubuntu@ip-172-31-21-52:~/course3_projects/5_Disaster_Recovery/2_Valero_k8s_disaster_recovery/kops_method$ kubectl logs ebs-csi-controller-55cb6776b4-4x2f6 -n kube-system
+Defaulted container "ebs-plugin" out of: ebs-plugin, csi-provisioner, csi-attacher, csi-resizer, liveness-probe
+I0714 22:48:19.133506       1 driver.go:73] Driver: ebs.csi.aws.com Version: v1.14.1
+I0714 22:48:19.133872       1 controller.go:82] [Debug] Retrieving region from metadata service
+I0714 22:48:19.133959       1 metadata.go:85] retrieving instance data from ec2 metadata
+I0714 22:48:19.137484       1 metadata.go:92] ec2 metadata is available
+I0714 22:48:19.138331       1 metadata_ec2.go:25] regionFromSession 
+I0714 22:48:19.141247       1 driver.go:143] Listening for connections on address: &net.UnixAddr{Name:"/var/lib/csi/sockets/pluginproxy/csi.sock", Net:"unix"}
+I0714 22:48:20.704506       1 controller.go:416] ControllerGetCapabilities: called with args {XXX_NoUnkeyedLiteral:{} XXX_unrecognized:[] XXX_sizecache:0}
+I0714 22:48:22.244282       1 controller.go:416] ControllerGetCapabilities: called with args {XXX_NoUnkeyedLiteral:{} XXX_unrecognized:[] XXX_sizecache:0}
+I0714 22:48:23.678459       1 controller.go:416] ControllerGetCapabilities: called with args {XXX_NoUnkeyedLiteral:{} XXX_unrecognized:[] XXX_sizecache:0}
+I0714 22:48:23.682823       1 controller.go:416] ControllerGetCapabilities: called with args {XXX_NoUnkeyedLiteral:{} XXX_unrecognized:[] XXX_sizecache:0}
+I0714 23:02:34.694476       1 controller.go:104] CreateVolume: called with args {Name:pvc-bf3b0ac3-5caa-4a22-96f5-6475bb122405 CapacityRange:required_bytes:8589934592  VolumeCapabilities:[mount:<fs_type:"ext4" > access_mode:<mode:SINGLE_NODE_WRITER > ] Parameters:map[csi.storage.k8s.io/pv/name:pvc-bf3b0ac3-5caa-4a22-96f5-6475bb122405 csi.storage.k8s.io/pvc/name:data-weatherapp-auth-mysql-0 csi.storage.k8s.io/pvc/namespace:default encrypted:true type:gp3] Secrets:map[] VolumeContentSource:<nil> AccessibilityRequirements:requisite:<segments:<key:"topology.ebs.csi.aws.com/zone" value:"us-east-1a" > > preferred:<segments:<key:"topology.ebs.csi.aws.com/zone" value:"us-east-1a" > >  XXX_NoUnkeyedLiteral:{} XXX_unrecognized:[] XXX_sizecache:0}
+I0714 23:02:38.113489       1 inflight.go:74] Node Service: volume="pvc-bf3b0ac3-5caa-4a22-96f5-6475bb122405" operation finished
+I0714 23:02:38.726463       1 controller.go:325] ControllerPublishVolume: called with args {VolumeId:vol-0b0e6fac9f10749ba NodeId:i-091cb5dadda0655f2 VolumeCapability:mount:<fs_type:"ext4" > access_mode:<mode:SINGLE_NODE_WRITER >  Readonly:false Secrets:map[] VolumeContext:map[storage.kubernetes.io/csiProvisionerIdentity:1720997300705-8081-ebs.csi.aws.com] XXX_NoUnkeyedLiteral:{} XXX_unrecognized:[] XXX_sizecache:0}
+I0714 23:02:39.505037       1 cloud.go:498] [Debug] AttachVolume volume="vol-0b0e6fac9f10749ba" instance="i-091cb5dadda0655f2" request returned {
+  AttachTime: 2024-07-14 23:02:39.487 +0000 UTC,
+  Device: "/dev/xvdba",
+  InstanceId: "i-091cb5dadda0655f2",
+  State: "attaching",
+  VolumeId: "vol-0b0e6fac9f10749ba"
+}
+I0714 23:02:39.639025       1 cloud.go:670] Waiting for volume "vol-0b0e6fac9f10749ba" state: actual=attaching, desired=attached
+I0714 23:02:40.739372       1 manager.go:197] [Debug] Releasing in-process attachment entry: /dev/xvdba -> volume vol-0b0e6fac9f10749ba
+I0714 23:02:40.739404       1 controller.go:353] [Debug] ControllerPublishVolume: volume vol-0b0e6fac9f10749ba attached to node i-091cb5dadda0655f2 through device /dev/xvdba
+I0715 00:20:57.870229       1 controller.go:384] ControllerUnpublishVolume: called with args {VolumeId:vol-0b0e6fac9f10749ba NodeId:i-091cb5dadda0655f2 Secrets:map[] XXX_NoUnkeyedLiteral:{} XXX_unrecognized:[] XXX_sizecache:0}
+I0715 00:20:58.395374       1 cloud.go:670] Waiting for volume "vol-0b0e6fac9f10749ba" state: actual=detaching, desired=detached
+I0715 00:20:59.497334       1 cloud.go:670] Waiting for volume "vol-0b0e6fac9f10749ba" state: actual=detaching, desired=detached
+I0715 00:21:01.382446       1 cloud.go:670] Waiting for volume "vol-0b0e6fac9f10749ba" state: actual=detaching, desired=detached
+I0715 00:21:04.725543       1 controller.go:398] [Debug] ControllerUnpublishVolume: volume vol-0b0e6fac9f10749ba detached from node i-091cb5dadda0655f2
+I0715 00:21:29.421101       1 controller.go:292] DeleteVolume: called with args: {VolumeId:vol-0b0e6fac9f10749ba Secrets:map[] XXX_NoUnkeyedLiteral:{} XXX_unrecognized:[] XXX_sizecache:0}
+I0715 00:21:29.613952       1 inflight.go:74] Node Service: volume="vol-0b0e6fac9f10749ba" operation finished
+I0715 00:22:34.129075       1 controller.go:325] ControllerPublishVolume: called with args {VolumeId:vol-0ba02feec2e5c63cf NodeId:i-091cb5dadda0655f2 VolumeCapability:mount:<fs_type:"ext4" > access_mode:<mode:SINGLE_NODE_WRITER >  Readonly:false Secrets:map[] VolumeContext:map[storage.kubernetes.io/csiProvisionerIdentity:1720997300705-8081-ebs.csi.aws.com] XXX_NoUnkeyedLiteral:{} XXX_unrecognized:[] XXX_sizecache:0}
+I0715 00:22:34.907528       1 manager.go:197] [Debug] Releasing in-process attachment entry: /dev/xvdba -> volume vol-0ba02feec2e5c63cf
+E0715 00:22:34.909342       1 driver.go:120] GRPC error: rpc error: code = Internal desc = Could not attach volume "vol-0ba02feec2e5c63cf" to node "i-091cb5dadda0655f2": could not attach volume "vol-0ba02feec2e5c63cf" to node "i-091cb5dadda0655f2": IncorrectState: vol-0ba02feec2e5c63cf is not 'available'.
+        status code: 400, request id: 2787c813-b1e5-4409-b79e-5ef0199c364b
+I0715 00:22:34.929725       1 controller.go:325] ControllerPublishVolume: called with args {VolumeId:vol-0ba02feec2e5c63cf NodeId:i-091cb5dadda0655f2 VolumeCapability:mount:<fs_type:"ext4" > access_mode:<mode:SINGLE_NODE_WRITER >  Readonly:false Secrets:map[] VolumeContext:map[storage.kubernetes.io/csiProvisionerIdentity:1720997300705-8081-ebs.csi.aws.com] XXX_NoUnkeyedLiteral:{} XXX_unrecognized:[] XXX_sizecache:0}
+I0715 00:22:35.646141       1 cloud.go:498] [Debug] AttachVolume volume="vol-0ba02feec2e5c63cf" instance="i-091cb5dadda0655f2" request returned {
+  AttachTime: 2024-07-15 00:22:35.629 +0000 UTC,
+  Device: "/dev/xvdba",
+  InstanceId: "i-091cb5dadda0655f2",
+  State: "attaching",
+  VolumeId: "vol-0ba02feec2e5c63cf"
+}
+I0715 00:22:35.756494       1 cloud.go:670] Waiting for volume "vol-0ba02feec2e5c63cf" state: actual=attaching, desired=attached
+I0715 00:22:36.854505       1 manager.go:197] [Debug] Releasing in-process attachment entry: /dev/xvdba -> volume vol-0ba02feec2e5c63cf
+I0715 00:22:36.854532       1 controller.go:353] [Debug] ControllerPublishVolume: volume vol-0ba02feec2e5c63cf attached to node i-091cb5dadda0655f2 through device /dev/xvdba
+I0715 00:22:36.863897       1 controller.go:325] ControllerPublishVolume: called with args {VolumeId:vol-0ba02feec2e5c63cf NodeId:i-091cb5dadda0655f2 VolumeCapability:mount:<fs_type:"ext4" > access_mode:<mode:SINGLE_NODE_WRITER >  Readonly:false Secrets:map[] VolumeContext:map[storage.kubernetes.io/csiProvisionerIdentity:1720997300705-8081-ebs.csi.aws.com] XXX_NoUnkeyedLiteral:{} XXX_unrecognized:[] XXX_sizecache:0}
+I0715 00:22:37.166548       1 controller.go:353] [Debug] ControllerPublishVolume: volume vol-0ba02feec2e5c63cf attached to node i-091cb5dadda0655f2 through device /dev/xvdba
+
+
+
+##### The old volume has been replaced with this new volume that has the original mysql contents 
+
+
+#### Step 8: Test the app and the original user should be able to log in again.
 
 
 
