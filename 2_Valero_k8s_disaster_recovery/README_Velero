@@ -26,10 +26,19 @@ https://aws.amazon.com/blogs/containers/backup-and-restore-your-amazon-eks-clust
 
 Get the EKS cluster up and running first
 
+export KUBECONFIG=~/.kube/eksctl/config
+
+The export is useful if running kops and EKS simulataneously on the EC2 controller so that the kubeconfig files don't get mixed.   The different contexts can be handled in either but not sure if both running on same file will work out so good....
+
+
 
 eksctl create cluster -f cluster.yaml
 
+For the one node setup run this:
+eksctl create cluster -f cluster_one_node.yaml 
+
 NOTE: I have added the version in the yaml file. This is used to troubleshoot issues between the kops cluster and the EKS cluster setups (for example the mysql goland panic/crash issue only on EKS).   I determined it is NOT the kubernetes version itself. EKS might be missing dependency files to run the golang code.  This issue is still open.
+Testing now to see if it is due to the 3 node setup used on EKS vs. the one node kops setup that i used to deploy the weatherapp.  The number of nodes in the cluster is not the cause either. I am currently running with 1 node only and still crashing.
 
 
 ubuntu@ip-172-31-21-52:~/course3_eksctl$ kubectl get node -o wide
@@ -39,12 +48,14 @@ ip-192-168-33-103.ec2.internal   Ready    <none>   13m   v1.26.15-eks-ae9a62a   
 ip-192-168-51-208.ec2.internal   Ready    <none>   13m   v1.26.15-eks-ae9a62a   192.168.51.208   54.156.79.81     Amazon Linux 2   5.10.219-208.866.amzn2.x86_64   containerd://1.7.11
 
 
-NOTE that there are issues (bug) with the EKS cluster delete. This command with flag will resolve this issue:
+##### NOTE that there are issues (bug) with the EKS cluster delete. This command with flag will resolve this issue:
 
 eksctl delete cluster -f cluster.yaml --disable-nodegroup-eviction
 
 
 eksctl delete cluster --disable-nodegroup-eviction or eksctl delete nodegroup --disable-eviction.
+
+Either one of these commands works fine.
 
 
 #### Step 1: S3 bucket
@@ -246,7 +257,7 @@ bitnami                 https://charts.bitnami.com/bitnami
 aws-ebs-csi-driver      https://kubernetes-sigs.github.io/aws-ebs-csi-driver
 vmware-tanzu            https://vmware-tanzu.github.io/helm-charts   
 
-
+Use helm repo remove <repo_name> to remove a helm repo.
 
 Next, do velero server install with helm:
 
@@ -304,7 +315,15 @@ velero install \
 
 
 Velero server is deployed as a pod on the cluster
+It should be in running state
 
+
+
+kubectl get secret/velero -n velero
+
+kubectl get secret -n velero
+NAME                           TYPE                 DATA   AGE
+sh.helm.release.v1.velero.v1   helm.sh/release.v1   1      6m24s
 
 kubectl get deployment -n velero
 
@@ -383,7 +402,7 @@ install the weatherapp on the EKS cluster using helm
 helm upgrade --install weatherapp-auth --set mysql.auth.rootPassword=mystrongpassword .
 
 
-This is due to the aforementioned panic issue. This works with kops cluster.
+This is due to the aforementioned panic issue. This works with kops cluster. I also tried getting this weatherapp up in single node EKS environment and it still fails.
 
 ubuntu@ip-172-31-21-52:~/course3_projects/4_CICD_EKS_Gitlab/source_files/weatherapp/weatherapp-auth$ kubectl get pod
 NAME                               READY   STATUS             RESTARTS      AGE
@@ -707,7 +726,7 @@ data-weatherapp-auth-mysql-0   Pending                                      gp2 
 ### CLUSTER MIGRATION (DATA MIGRATION) TO A NEW CLUSTER USING EKS CLUSTERS:
 
 
-
+WIP need to do this on EKS.  Need to create a cluster3 counterpart to cluster2. This will use multiple contexts.
 
 
 
