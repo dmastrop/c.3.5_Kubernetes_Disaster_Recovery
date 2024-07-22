@@ -1122,6 +1122,12 @@ NOTE: Unlike with kops, the cluster3 volume is named with cluster3 so it should 
 
 
 
+#### Step 16: Cleanup. Delete the two EKS clusters
+
+cluster2 (single node setup)
+eksctl delete cluster -f cluster_one_node.yaml --disable-nodegroup-eviction
+
+cluster3 (singel node setup)
 
 
 
