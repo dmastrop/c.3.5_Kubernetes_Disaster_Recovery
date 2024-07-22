@@ -61,7 +61,7 @@ Either one of these commands works fine.
 #### Step 1: S3 bucket
 
 Make sure that this has been created. I am using the same S3 bucket for both EKS and Non-EKS Velero testing.
-
+arn:aws:s3:::recovery.holinessinloveofchrist.com
 
 
 #### Step 2: Velero client installation. 
@@ -80,7 +80,7 @@ Initially before the Velero server is installed on the EKS cluster, the velero v
 
 NOTE: FOR EKS will use helm to install the velero server. The latest version is 1.14.0.  This requires a provisioned IAM role with proper permissions in the values.yaml file. The role and policy need to be created first prior to installing velero server with helm. See next steps below.
 
-#### Step 3: Create a policy from the velero_policy.json file on the EC2 controller. The policy json file is below.  Note this defines the actions that will be permitted on the recovery.holinessinloveofchrist.com S3 bucket for the backup and restore operations.
+#### Step 3: Create a policy from the velero_policy.json file on the EC2 controller. The policy json file is below.  Note this defines the actions that will be permitted on the recovery.holinessinloveofchrist.com S3 bucket for the backup and restore operations.  THe policy name will be VeleroAccessPolicy
 
 
 {
