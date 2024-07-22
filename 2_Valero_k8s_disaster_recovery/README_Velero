@@ -299,7 +299,7 @@ NOTE: the velero client is already installed.
 
 #### Step 9: NOTE the differences in installing velero server on kops cluster vs. EKS cluster.
 
-NOTE: with kops I used the following to install the Velero server on the kops cluster
+NOTE: with kops I used the following to install the Velero server on the kops cluster (use velero client)
 
 velero install \
 --provider aws \
@@ -319,11 +319,12 @@ It should be in running state
 
 
 
-kubectl get secret/velero -n velero
+kubectl get secret/velero-repo-credentials -n velero
 
 kubectl get secret -n velero
 NAME                           TYPE                 DATA   AGE
-sh.helm.release.v1.velero.v1   helm.sh/release.v1   1      6m24s
+sh.helm.release.v1.velero.v1   helm.sh/release.v1   1      103s
+velero-repo-credentials        Opaque               1      82s
 
 kubectl get deployment -n velero
 
@@ -449,7 +450,7 @@ weatherapp-weather-77b797b646-trr6w   1/1     Running            0             4
 
 
 
-
+NOTE: with 1 node eksctl EKS setup the last pod will not start because scheduler needs a second node to schedule the last pod due to preemption issues.  So must use at least 2 nodes for functional testing.  With kops the entire setup works on single node setup.
 
 #### Step 12: Finally ready to do a backup and restore of the cluster
 
@@ -536,12 +537,12 @@ HooksFailed:     0
 
 
 
-#### Step 13: Do a restore of the cluster with the backup that was just created (golden-backup5). With the kops working setup we are able to intentinally corrupt the mysql database after taking the backup so that the restore will make a functionl difference. We can do the same here, but cannot actually test it from the browser.(see kops setup for how to do this)
+#### Step 13: Do a restore of the cluster with the backup that was just created (golden-backup5). With the kops working setup we are able to intentinally corrupt the mysql database after taking the backup so that the restore will make a functionl difference. We can do the same here, but cannot actually test it from the browser.(see kops setup for how to do this). The problem is that the mysql pod is not coming up so cannot perform this type of testing until the panic issue on EKS is resolved....
 
 
 
 Here is the current state of the pods and services prior to the restore
-
+NOTE: with 1 node setup the last pod will not come up. Need at least 2 nodes to get weatherapp running on eksctl EKS cluster.
 
  kubectl get pod
 NAME                                  READY   STATUS             RESTARTS         AGE
@@ -566,6 +567,10 @@ weatherapp-weather               ClusterIP      10.100.33.222    <none>         
 
 
 #### Step 14: Before restoring must delete the stateful set (sts) and the PVC
+
+
+
+
 
 The reasoning is that Velero does not overwrite exsiting items when doing the restore.   This will force velero to replace the PVC and create a new sts.
 
@@ -708,6 +713,9 @@ NAME                           STATUS    VOLUME   CAPACITY   ACCESS MODES   STOR
 data-weatherapp-auth-mysql-0   Pending                                      gp2            5m59s
 
 
+
+
+
 #### Step 18:  there is a completely new volume attached to the mysql pod in the working scenario (see kops setup below)
  This would be visible in the following command for the ebs controller
 
@@ -725,8 +733,413 @@ data-weatherapp-auth-mysql-0   Pending                                      gp2 
 
 ### CLUSTER MIGRATION (DATA MIGRATION) TO A NEW CLUSTER USING EKS CLUSTERS:
 
+Active-passive: one active and second one in standby. A record modified to send traffic to second cluster.mIgrate most recent version of db to new cluster. Some downtime will occur and db skew.Second mode: Active-passive: one active and second one in standby. A record modified to send traffic to second cluster.mIgrate most recent version of db to new cluster. Some downtime will occur and db skew.
 
-WIP need to do this on EKS.  Need to create a cluster3 counterpart to cluster2. This will use multiple contexts.
+
+#### Step 1: Get second EKS cluster (cluster3) up and running
+
+
+Note must be in same availability zone and region as the first cluster (cluster2)
+
+
+
+Current kube config file (~/.kube/eksctl/config) has only one context for cluster2
+
+create the cluster3 (second cluster) on EKS
+
+eksctl create cluster -f cluster_cluster3.yaml
+
+NOTE: the yaml file only starts one node for basic testing purposes here.
+
+
+
+#### Step 2: Kubeconfig file now has cluster2 and cluster3 contexts
+
+
+#### Step 3: Verify the two contexts, one for cluster2 and one for cluster3
+
+
+kubectl config get-contexts
+CURRENT   NAME                                                        CLUSTER                        AUTHINFO                                                    NAMESPACE
+          kops-project14-EC2-IAM-admin@cluster2.us-east-1.eksctl.io   cluster2.us-east-1.eksctl.io   kops-project14-EC2-IAM-admin@cluster2.us-east-1.eksctl.io   
+*         kops-project14-EC2-IAM-admin@cluster3.us-east-1.eksctl.io   cluster3.us-east-1.eksctl.io   kops-project14-EC2-IAM-admin@cluster3.us-east-1.eksctl.io   
+
+
+kubectl config use-context  kops-project14-EC2-IAM-admin@cluster2.us-east-1.eksctl.io 
+Switched to context "kops-project14-EC2-IAM-admin@cluster2.us-east-1.eksctl.io".
+
+kubectl get node
+NAME                            STATUS   ROLES    AGE   VERSION
+ip-192-168-57-68.ec2.internal   Ready    <none>   78m   v1.26.15-eks-ae9a62a
+
+
+kubectl config use-context kops-project14-EC2-IAM-admin@cluster3.us-east-1.eksctl.io 
+Switched to context "kops-project14-EC2-IAM-admin@cluster3.us-east-1.eksctl.io".
+
+
+kubectl get node
+NAME                             STATUS   ROLES    AGE     VERSION
+ip-192-168-20-183.ec2.internal   Ready    <none>   6m44s   v1.26.15-eks-ae9a62a
+
+
+
+#### Step 4: important notes:
+
+NOTE: Clusters must be in same availability as the node expects to access a persistent volume in the same  availability zone like the original cluster.
+
+
+The second cluster is empty . It does not have the application or any state of it.
+
+
+The volume needs to be created from scratch.  On kops a ec2:CreateVolume needs to be added to the second cluster kops configuration (kops edit cluster). On EKS this is taken care of with wth policy that is attached to the role used in the service account (see below)
+
+
+
+#### Step 5: Install velero server onto the second cluster (cluster3)
+
+
+#### Step 6: To install the server, need to first create iamservice account like on cluster2 but role name will be eks-velero-recovery instead of eks-velero-backup. This will create a new role on the AWS console 
+
+First make sure on the cluster3 context
+
+Make sure on cluster3
+
+ubuntu@ip-172-31-21-52:~/course3_eksctl$ kubectl config get-contexts
+CURRENT   NAME                                                        CLUSTER                        AUTHINFO                                                    NAMESPACE
+          kops-project14-EC2-IAM-admin@cluster2.us-east-1.eksctl.io   cluster2.us-east-1.eksctl.io   kops-project14-EC2-IAM-admin@cluster2.us-east-1.eksctl.io   
+*         kops-project14-EC2-IAM-admin@cluster3.us-east-1.eksctl.io   cluster3.us-east-1.eksctl.io   kops-project14-EC2-IAM-admin@cluster3.us-east-1.eksctl.io  
+
+
+
+Then run this command to create the new role and bind it to the iam service account velero-server for this cluster3.  Note the role name is changed from eks-velero-backup to eks-velero-restore. The policy is the same.
+
+
+eksctl create iamserviceaccount --cluster=cluster3 --name=velero-server --namespace=velero --role-name=eks-velero-restore --role-only --attach-policy-arn=arn:aws:iam::590183769797:policy/VeleroAccessPolicy --approve
+
+
+
+
+#### Step 7: NOTE that an IAM OIDC provider has te be created for cluster3. Commands are below. Once the OIDC provider is created then the full eksctl command can be run.
+
+
+
+eksctl create iamserviceaccount --cluster=cluster3 --name=velero-server --namespace=velero --role-name=eks-velero-restore --role-only --attach-policy-arn=arn:aws:iam::590183769797:policy/VeleroAccessPolicy --approve
+2024-07-22 01:27:05 [!]  no IAM OIDC provider associated with cluster, try 'eksctl utils associate-iam-oidc-provider --region=us-east-1 --cluster=cluster3'
+Error: unable to create iamserviceaccount(s) without IAM OIDC provider enabled
+
+
+eksctl utils associate-iam-oidc-provider --region=us-east-1 --cluster=cluster3
+2024-07-22 01:27:22 [ℹ]  (plan) would create IAM Open ID Connect provider for cluster "cluster3" in "us-east-1"
+2024-07-22 01:27:22 [!]  no changes were applied, run again with '--approve' to apply the changes
+
+
+eksctl utils associate-iam-oidc-provider --region=us-east-1 --cluster=cluster3 --approve
+2024-07-22 01:27:30 [ℹ]  will create IAM Open ID Connect provider for cluster "cluster3" in "us-east-1"
+2024-07-22 01:27:30 [✔]  created IAM Open ID Connect provider for cluster "cluster3" in "us-east-1"
+
+
+eksctl create iamserviceaccount --cluster=cluster3 --name=velero-server --namespace=velero --role-name=eks-velero-restore --role-only --attach-policy-arn=arn:aws:iam::590183769797:policy/VeleroAccessPolicy --approve
+
+2024-07-22 01:27:35 [ℹ]  1 iamserviceaccount (velero/velero-server) was included (based on the include/exclude rules)
+2024-07-22 01:27:35 [!]  serviceaccounts in Kubernetes will not be created or modified, since the option --role-only is used
+2024-07-22 01:27:35 [ℹ]  1 task: { create IAM role for serviceaccount "velero/velero-server" }
+2024-07-22 01:27:35 [ℹ]  building iamserviceaccount stack "eksctl-cluster3-addon-iamserviceaccount-velero-velero-server"
+2024-07-22 01:27:35 [ℹ]  deploying stack "eksctl-cluster3-addon-iamserviceaccount-velero-velero-server"
+2024-07-22 01:27:35 [ℹ]  waiting for CloudFormation stack "eksctl-cluster3-addon-iamserviceaccount-velero-velero-server"
+2024-07-22 01:28:05 [ℹ]  waiting for CloudFormation stack "eksctl-cluster3-addon-iamserviceaccount-velero-velero-server"
+
+
+
+#### Step 8: Create a new values.yaml file rename as values_recovery_migration.yaml for this migration. The only difference is the arn for the service account role name. It is changed from eks-velero-backup to eks-velero-restore.
+
+The file is below. This will be used for the helm install of velero server onto cluster3
+
+
+configuration:
+  backupStorageLocation:
+    # s3 bucket was created earlier
+  - bucket: recovery.holinessinloveofchrist.com
+    provider: aws
+
+
+  volumeSnapshotLocation:
+  - config:
+      region: us-east-1
+    provider: aws
+
+
+credentials:
+  useSecret: false
+
+
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.2.0
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+
+serviceAccount:
+  server:
+    annotations:
+      # this can be found in AWS; the role that we created and linked to the service account
+      eks.amazonaws.com/role-arn: "arn:aws:iam::590183769797:role/eks-velero-restore"
+
+
+
+
+#### Step 9: Run helm install for the velero server installation onto cluster3
+
+
+helm install velero vmware-tanzu/velero --create-namespace --namespace velero -f values_recovery_migration.yaml
+
+
+
+helm install velero vmware-tanzu/velero --create-namespace --namespace velero -f values_recovery_migration.yaml
+WARNING: Kubernetes configuration file is group-readable. This is insecure. Location: /home/ubuntu/.kube/eksctl/config
+WARNING: Kubernetes configuration file is world-readable. This is insecure. Location: /home/ubuntu/.kube/eksctl/config
+NAME: velero
+LAST DEPLOYED: Mon Jul 22 01:38:50 2024
+NAMESPACE: velero
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+Check that the velero is up and running:
+
+    kubectl get deployment/velero -n velero
+
+Check that the secret has been created:
+
+    kubectl get secret/velero -n velero
+
+Once velero server is up and running you need the client before you can use it
+1. wget https://github.com/vmware-tanzu/velero/releases/download/v1.14.0/velero-v1.14.0-darwin-amd64.tar.gz
+2. tar -xvf velero-v1.14.0-darwin-amd64.tar.gz -C velero-client
+
+More info on the official site: https://velero.io/docs
+
+
+
+#### Step 10: verify that the velero server is installed onto cluster3
+
+
+kubectl get ns
+NAME              STATUS   AGE
+default           Active   38m
+kube-node-lease   Active   38m
+kube-public       Active   38m
+kube-system       Active   38m
+velero            Active   3m3s
+
+kubectl get pod -n velero
+NAME                      READY   STATUS    RESTARTS   AGE
+velero-847dcfb7c4-s9qwx   1/1     Running   0          2m53s
+
+
+$ velero version
+Client:
+        Version: v1.14.0
+        Git commit: 2fc6300f2239f250b40b0488c35feae59520f2d3
+Server:
+        Version: v1.14.0
+
+
+kubectl get deployment -n velero
+NAME     READY   UP-TO-DATE   AVAILABLE   AGE
+velero   1/1     1            1           3m19s
+
+
+
+#### Step 11: With velero server installed get the list of current velero backups.
+
+velero get backups
+NAME             STATUS      ERRORS   WARNINGS   CREATED                         EXPIRES   STORAGE LOCATION   SELECTOR
+golden-backu4    Completed   0        0          2024-07-15 19:33:15 +0000 UTC   23d       default            <none>
+golden-backup    Completed   0        0          2024-07-12 02:22:56 +0000 UTC   20d       default            <none>
+golden-backup2   Completed   0        0          2024-07-13 00:56:04 +0000 UTC   20d       default            <none>
+golden-backup3   Completed   0        0          2024-07-15 00:15:07 +0000 UTC   22d       default            <none>
+golden-backup5   Completed   0        1          2024-07-19 23:07:05 +0000 UTC   27d       default            <none>
+golden-backup6   Completed   0        1          2024-07-22 00:27:50 +0000 UTC   29d       default            <none>
+
+We wil be using golden-backup6 which is the backup of cluster2 in the current EKS setup 
+
+
+
+#### Step 12: Run velero restore create to create a restore to cluster3 from golden-backup6 of cluster2
+
+ubuntu@ip-172-31-21-52:~/course3_projects/5_Disaster_Recovery/2_Valero_k8s_disaster_recovery$ velero restore create golden-restore-eks3-cluster3 --from-backup golden-backup6
+Restore request "golden-restore-eks3-cluster3" submitted successfully.
+Run `velero restore describe golden-restore-eks3-cluster3` or `velero restore logs golden-restore-eks3-cluster3` for more details.
+ubuntu@ip-172-31-21-52:~/course3_projects/5_Disaster_Recovery/2_Valero_k8s_disaster_recovery$ velero restore describe golden-restore-eks3-cluster3
+Name:         golden-restore-eks3-cluster3
+Namespace:    velero
+Labels:       <none>
+Annotations:  <none>
+
+Phase:                       Completed
+Total items to be restored:  405
+Items restored:              405
+
+Started:    2024-07-22 01:47:04 +0000 UTC
+Completed:  2024-07-22 01:47:17 +0000 UTC
+
+Warnings:
+  Velero:     <none>
+  Cluster:  could not restore, CustomResourceDefinition "backuprepositories.velero.io" already exists. Warning: the in-cluster version is different than the backed-up version
+            could not restore, CustomResourceDefinition "backups.velero.io" already exists. Warning: the in-cluster version is different than the 
+version
+
+
+EDITED TO SAVE SPACE
+
+
+
+
+    kube-node-lease:  could not restore, ConfigMap "kube-root-ca.crt" already exists. Warning: the in-cluster version is different than the backed-up version
+
+Backup:  golden-backup6
+
+Namespaces:
+  Included:  all namespaces found in the backup
+  Excluded:  <none>
+
+Resources:
+  Included:        *
+  Excluded:        nodes, events, events.events.k8s.io, backups.velero.io, restores.velero.io, resticrepositories.velero.io, csinodes.storage.k8s.io, volumeattachments.storage.k8s.io, backuprepositories.velero.io
+  Cluster-scoped:  auto
+
+Namespace mappings:  <none>
+
+Label selector:  <none>
+
+Or label selector:  <none>
+
+Restore PVs:  auto
+
+CSI Snapshot Restores: <none included>
+
+Existing Resource Policy:   <none>
+ItemOperationTimeout:       4h0m0s
+
+Preserve Service NodePorts:  auto
+
+Uploader config:
+
+
+HooksAttempted:   0
+HooksFailed:      0
+
+
+
+Verify the setup
+
+
+
+
+#### Step 13: Verify the new cluster3 setup with the data migrated to it from the restore above:
+
+
+
+Note that the service URL is different as it should be. The A record in DNS would have to be changed to point to this new URL and redirect traffic to the new data migrated cluster3
+
+
+Note pods are named the same but are new pods in cluster3 (see timestamp differences of cluster2 pods vs. cluster3 pods)
+
+
+
+Cluster3: (The new cluster that data from cluster2 was migrated to)
+
+kubectl get pod
+NAME                                  READY   STATUS             RESTARTS      AGE
+weatherapp-auth-76c8df5d6b-lr7fs      0/1     CrashLoopBackOff   4 (33s ago)   2m25s
+weatherapp-auth-76c8df5d6b-sllgl      0/1     CrashLoopBackOff   4 (34s ago)   2m25s
+weatherapp-auth-mysql-0               0/1     Pending            0             2m22s
+weatherapp-ui-5bd8dcc685-46sqd        1/1     Running            0             2m25s
+weatherapp-ui-5bd8dcc685-lqk87        1/1     Running            0             2m25s
+weatherapp-weather-77b797b646-jqmbl   1/1     Running            0             2m25s
+weatherapp-weather-77b797b646-mj44b   1/1     Running            0             2m25s
+
+kubectl get svc
+NAME                             TYPE           CLUSTER-IP       EXTERNAL-IP                                                               PORT(S)        AGE
+kubernetes                       ClusterIP      10.100.0.1       <none>                                                                    443/TCP        45m
+weatherapp-auth                  ClusterIP      10.100.194.68    <none>                                                                    8080/TCP       2m30s
+weatherapp-auth-mysql            ClusterIP      10.100.100.77    <none>                                                                    3306/TCP       2m30s
+weatherapp-auth-mysql-headless   ClusterIP      None             <none>                                                                    3306/TCP       2m31s
+weatherapp-ui                    LoadBalancer   10.100.130.141   afa9f4ef79d17413583316dc8e15336d-1820909783.us-east-1.elb.amazonaws.com   80:30130/TCP   2m30s
+weatherapp-weather               ClusterIP      10.100.6.230     <none>                                                                    5000/TCP       2m30s
+
+
+kubectl config get-contexts
+CURRENT   NAME                                                        CLUSTER                        AUTHINFO                                                    NAMESPACE
+          kops-project14-EC2-IAM-admin@cluster2.us-east-1.eksctl.io   cluster2.us-east-1.eksctl.io   kops-project14-EC2-IAM-admin@cluster2.us-east-1.eksctl.io   
+*         kops-project14-EC2-IAM-admin@cluster3.us-east-1.eksctl.io   cluster3.us-east-1.eksctl.io   kops-project14-EC2-IAM-admin@cluster3.us-east-1.eksctl.io   
+
+
+
+
+
+
+
+Cluster2:  
+
+kubectl config use-context kops-project14-EC2-IAM-admin@cluster2.us-east-1.eksctl.io 
+Switched to context "kops-project14-EC2-IAM-admin@cluster2.us-east-1.eksctl.io".
+
+kubectl get node
+NAME                            STATUS   ROLES    AGE    VERSION
+ip-192-168-57-68.ec2.internal   Ready    <none>   113m   v1.26.15-eks-ae9a62a
+
+kubectl get pod
+NAME                                  READY   STATUS             RESTARTS         AGE
+weatherapp-auth-76c8df5d6b-lr7fs      0/1     CrashLoopBackOff   23 (115s ago)    95m
+weatherapp-auth-76c8df5d6b-sllgl      0/1     CrashLoopBackOff   23 (2m22s ago)   95m
+weatherapp-auth-mysql-0               0/1     Pending            0                73m
+weatherapp-ui-5bd8dcc685-46sqd        1/1     Running            0                94m
+weatherapp-ui-5bd8dcc685-lqk87        1/1     Running            0                94m
+weatherapp-weather-77b797b646-jqmbl   1/1     Running            0                93m
+weatherapp-weather-77b797b646-mj44b   1/1     Running            0                93m
+
+
+kubectl get svc
+NAME                             TYPE           CLUSTER-IP      EXTERNAL-IP                                                               PORT(S)        AGE
+kubernetes                       ClusterIP      10.100.0.1      <none>                                                                    443/TCP        120m
+weatherapp-auth                  ClusterIP      10.100.84.252   <none>                                                                    8080/TCP       95m
+weatherapp-auth-mysql            ClusterIP      10.100.106.99   <none>                                                                    3306/TCP       95m
+weatherapp-auth-mysql-headless   ClusterIP      None            <none>                                                                    3306/TCP       95m
+weatherapp-ui                    LoadBalancer   10.100.87.147   a75df8a1815cc49e48890f74b89534bb-1354381515.us-east-1.elb.amazonaws.com   80:30057/TCP   94m
+weatherapp-weather               ClusterIP      10.100.189.11   <none>                                                                    5000/TCP       93m
+
+
+#### Step 14; On AWS console there is a new volume for the cluster3 that is a replica of the volume from cluster2
+
+
+NOTE: Unlike with kops, the cluster3 volume is named with cluster3 so it should be deleted without a race condition. See kops data migration for the race condition that occurs when deleting the old cluster.
+
+
+#### Step 15: On a working weatherapp setup, the user will be able to login with the cluster2 credentials onto the cluster3 weatherapp deployment using the new URL
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
